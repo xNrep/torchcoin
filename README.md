@@ -15,7 +15,7 @@ This project is designed to be deployed as a Render Blueprint.
 The Blueprint must be deployed/synced from a repository containing this project.
 If you create the web service manually instead, you must create a Render Postgres database and add its internal connection string as `DATABASE_URL`.
 
-### API
+## API
 
 GET `/health`
 
@@ -34,8 +34,22 @@ POST `/v1/auth/login`
 Authenticated endpoints:
 - GET `/v1/me`
 - GET `/v1/wallet`
+- POST `/v1/transactions`
 - GET `/v1/transactions`
 - GET `/v1/transactions/:id`
+
+### Send TC
+
+POST `/v1/transactions`
+```json
+{
+  "recipient": "player2",
+  "amount": 10,
+  "description": "Payment"
+}
+```
+
+The transfer is atomic: the sender is debited, the recipient is credited, and two ledger entries are created. A transfer cannot exceed the sender's balance or target the same account.
 
 Every new account starts with exactly 100 TC.
 
