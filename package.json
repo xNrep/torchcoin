@@ -1,14 +1,18 @@
 {
-  "name": "torchcoin-server",
-  "version": "1.0.0",
+  "name": "torchcoin-api-v3",
+  "version": "3.0.0",
   "private": true,
   "scripts": {
     "start": "node server.js"
   },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
-    "better-sqlite3": "^11.7.0",
+    "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "express": "^4.21.2",
-    "jsonwebtoken": "^9.0.2"
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.13.1"
   }
 }

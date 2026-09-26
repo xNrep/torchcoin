@@ -1,258 +1,161 @@
-/*
- TorchCoin Server v1
- Node.js + Express + SQLite
- Fictional in-app currency. No real-world monetary value.
-
- Run:
-   npm install
-   npm start
-
- Environment:
-   PORT=8787
-   JWT_SECRET=replace-me-with-a-long-random-secret
-   INITIAL_BALANCE=100
-*/
-
 const express = require("express");
-const crypto = require("crypto");
-const jwt = require("jsonwebtoken");
-const Database = require("better-sqlite3");
 const cors = require("cors");
+const crypto = require("crypto");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const { Pool } = require("pg");
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "32kb" }));
+app.use(express.json({ limit: "64kb" }));
 
-const PORT = Number(process.env.PORT || 8787);
-const JWT_SECRET = process.env.JWT_SECRET || "CHANGE_ME_IN_PRODUCTION";
-const INITIAL_BALANCE = Number(process.env.INITIAL_BALANCE || 100);
+const PORT = process.env.PORT || 3000;
+const DATABASE_URL = process.env.DATABASE_URL;
+const JWT_SECRET = process.env.JWT_SECRET;
 
-if (JWT_SECRET === "CHANGE_ME_IN_PRODUCTION") {
-  console.warn("WARNING: Set JWT_SECRET before public deployment.");
+if (!DATABASE_URL) console.warn("DATABASE_URL manquant.");
+if (!JWT_SECRET || JWT_SECRET.length < 32) {
+  console.warn("JWT_SECRET doit être une chaîne aléatoire d'au moins 32 caractères.");
 }
 
-const db = new Database("torchcoin.db");
-db.pragma("journal_mode = WAL");
-db.exec(`
-CREATE TABLE IF NOT EXISTS users (
-  id TEXT PRIMARY KEY,
-  username TEXT NOT NULL UNIQUE,
-  balance INTEGER NOT NULL CHECK(balance >= 0),
-  created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS projects (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  owner_user_id TEXT NOT NULL,
-  token_hash TEXT NOT NULL UNIQUE,
-  active INTEGER NOT NULL DEFAULT 1
-);
-CREATE TABLE IF NOT EXISTS project_permissions (
-  project_id TEXT PRIMARY KEY,
-  read_balance INTEGER NOT NULL DEFAULT 1,
-  purchase INTEGER NOT NULL DEFAULT 1
-);
-CREATE TABLE IF NOT EXISTS shops (
-  id TEXT PRIMARY KEY,
-  project_id TEXT NOT NULL,
-  name TEXT NOT NULL,
-  active INTEGER NOT NULL DEFAULT 1
-);
-CREATE TABLE IF NOT EXISTS items (
-  id TEXT PRIMARY KEY,
-  shop_id TEXT NOT NULL,
-  name TEXT NOT NULL,
-  price INTEGER NOT NULL CHECK(price >= 0),
-  active INTEGER NOT NULL DEFAULT 1
-);
-CREATE TABLE IF NOT EXISTS transactions (
-  id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  project_id TEXT,
-  type TEXT NOT NULL,
-  amount INTEGER NOT NULL,
-  item_id TEXT,
-  description TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS purchase_intents (
-  id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  project_id TEXT NOT NULL,
-  item_id TEXT NOT NULL,
-  amount INTEGER NOT NULL,
-  confirmation_hash TEXT NOT NULL,
-  status TEXT NOT NULL,
-  expires_at INTEGER NOT NULL,
-  created_at TEXT NOT NULL
-);
-`);
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false
+});
 
-function id(prefix) {
+function newId(prefix) {
   return prefix + "_" + crypto.randomBytes(12).toString("hex");
 }
-function hash(s) {
-  return crypto.createHash("sha256").update(s).digest("hex");
+
+function signToken(user) {
+  return jwt.sign({ sub:user.id, username:user.username }, JWT_SECRET, { expiresIn:"30d" });
 }
-function now() { return new Date().toISOString(); }
-function requireUser(req, res, next) {
+
+function auth(req,res,next) {
+  const h = req.headers.authorization || "";
+  if (!h.startsWith("Bearer ")) return res.status(401).json({error:"missing_token"});
   try {
-    const h = req.headers.authorization || "";
-    if (!h.startsWith("Bearer ")) return res.status(401).json({error:"User authentication required"});
     req.user = jwt.verify(h.slice(7), JWT_SECRET);
-    const u = db.prepare("SELECT * FROM users WHERE id=?").get(req.user.userId);
-    if (!u) return res.status(401).json({error:"Invalid user"});
-    req.userRow = u;
     next();
-  } catch { res.status(401).json({error:"Invalid user token"}); }
-}
-function requireProject(req, res, next) {
-  const raw = req.headers["x-project-token"];
-  if (!raw) return res.status(401).json({error:"Project token required"});
-  const p = db.prepare("SELECT * FROM projects WHERE token_hash=? AND active=1").get(hash(raw));
-  if (!p) return res.status(401).json({error:"Invalid project token"});
-  req.project = p;
-  next();
-}
-function requireBoth(req,res,next) {
-  requireUser(req,res,()=>requireProject(req,res,next));
+  } catch (_) {
+    return res.status(401).json({error:"invalid_token"});
+  }
 }
 
-app.get("/health", (req,res)=>res.json({ok:true, service:"TorchCoin", version:"1.0.0"}));
+async function init() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      username TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      balance INTEGER NOT NULL DEFAULT 100,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS transactions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      type TEXT NOT NULL,
+      amount INTEGER NOT NULL,
+      balance_after INTEGER NOT NULL,
+      description TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS transactions_user_idx
+      ON transactions(user_id, created_at DESC);
+  `);
+}
 
-app.post("/v1/dev/create-user", (req,res)=>{
-  // Development/demo endpoint. Disable or remove before public deployment.
-  const username = String(req.body.username || "").trim();
-  if (!username || username.length > 32) return res.status(400).json({error:"Invalid username"});
+app.get("/health", (_req,res) => res.json({ok:true,service:"torchcoin-api"}));
+
+app.post("/v1/auth/register", async (req,res) => {
   try {
-    const uid = id("usr");
-    db.prepare("INSERT INTO users(id,username,balance,created_at) VALUES(?,?,?,?)")
-      .run(uid, username, INITIAL_BALANCE, now());
-    const token = jwt.sign({userId:uid}, JWT_SECRET, {expiresIn:"30d"});
-    res.json({userId:uid, username, balance:INITIAL_BALANCE, token});
-  } catch(e) {
-    res.status(409).json({error:"Username already exists"});
+    const username = String(req.body.username || "").trim();
+    const password = String(req.body.password || "");
+    if (!/^[A-Za-z0-9_]{3,24}$/.test(username))
+      return res.status(400).json({error:"invalid_username"});
+    if (password.length < 8)
+      return res.status(400).json({error:"password_too_short"});
+
+    const exists = await pool.query("SELECT 1 FROM users WHERE LOWER(username)=LOWER($1)",[username]);
+    if (exists.rowCount) return res.status(409).json({error:"username_taken"});
+
+    const hash = await bcrypt.hash(password, 12);
+    const id = newId("usr");
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        "INSERT INTO users(id,username,password_hash,balance) VALUES($1,$2,$3,100)",
+        [id,username,hash]
+      );
+      await client.query(
+        "INSERT INTO transactions(id,user_id,type,amount,balance_after,description) VALUES($1,$2,$3,$4,$5,$6)",
+        [newId("tx"),id,"initial",100,100,"Initial TorchCoin balance"]
+      );
+      await client.query("COMMIT");
+    } catch (e) {
+      await client.query("ROLLBACK");
+      throw e;
+    } finally { client.release(); }
+
+    const token = signToken({id,username});
+    res.json({ok:true,id,username,balance:100,token});
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({error:"server_error"});
   }
 });
 
-app.post("/v1/dev/create-project", (req,res)=>{
-  // Development/demo endpoint. In production, project creation must require account auth.
-  const name = String(req.body.name || "").trim();
-  const ownerUserId = String(req.body.ownerUserId || "").trim();
-  if (!name || !ownerUserId) return res.status(400).json({error:"name and ownerUserId required"});
-  const user = db.prepare("SELECT id FROM users WHERE id=?").get(ownerUserId);
-  if (!user) return res.status(404).json({error:"Owner not found"});
-  const pid = id("prj");
-  const token = "pt_" + crypto.randomBytes(24).toString("base64url");
-  const tx = db.transaction(()=>{
-    db.prepare("INSERT INTO projects(id,name,owner_user_id,token_hash) VALUES(?,?,?,?)")
-      .run(pid,name,ownerUserId,hash(token));
-    db.prepare("INSERT INTO project_permissions(project_id) VALUES(?)").run(pid);
-  });
-  tx();
-  res.json({projectId:pid, projectToken:token});
-});
-
-app.post("/v1/dev/create-shop", (req,res)=>{
-  const {projectId, name, itemId, itemName, price} = req.body;
-  const p = db.prepare("SELECT id FROM projects WHERE id=?").get(projectId);
-  if (!p) return res.status(404).json({error:"Project not found"});
-  const sid = id("shop");
-  db.prepare("INSERT INTO shops(id,project_id,name) VALUES(?,?,?)").run(sid,projectId,String(name||"Shop"));
-  if (itemId && itemName) db.prepare("INSERT INTO items(id,shop_id,name,price) VALUES(?,?,?,?)")
-    .run(String(itemId),sid,String(itemName),Number(price));
-  res.json({shopId:sid});
-});
-
-app.get("/v1/me", requireUser, (req,res)=>res.json({
-  userId:req.userRow.id, username:req.userRow.username
-}));
-
-app.get("/v1/wallet", requireBoth, (req,res)=>{
-  const perm = db.prepare("SELECT * FROM project_permissions WHERE project_id=?").get(req.project.id);
-  if (!perm || !perm.read_balance) return res.status(403).json({error:"Project cannot read balance"});
-  res.json({balance:req.userRow.balance});
-});
-
-app.get("/v1/project", requireProject, (req,res)=>res.json({
-  projectId:req.project.id, name:req.project.name
-}));
-
-app.post("/v1/purchases/intents", requireBoth, (req,res)=>{
-  const perm = db.prepare("SELECT * FROM project_permissions WHERE project_id=?").get(req.project.id);
-  if (!perm || !perm.purchase) return res.status(403).json({error:"Project cannot make purchases"});
-
-  const shopId = String(req.body.shopId || "");
-  const itemId = String(req.body.itemId || "");
-  const item = db.prepare(`
-    SELECT i.*, s.project_id FROM items i JOIN shops s ON s.id=i.shop_id
-    WHERE i.id=? AND i.shop_id=? AND s.project_id=? AND i.active=1 AND s.active=1
-  `).get(itemId, shopId, req.project.id);
-  if (!item) return res.status(404).json({error:"Item not found"});
-  if (req.userRow.balance < item.price) return res.status(400).json({error:"Insufficient TorchCoin"});
-
-  const intentId = id("pi");
-  const confirmationToken = crypto.randomBytes(24).toString("base64url");
-  const expires = Date.now() + 2 * 60 * 1000;
-  db.prepare(`
-    INSERT INTO purchase_intents(id,user_id,project_id,item_id,amount,confirmation_hash,status,expires_at,created_at)
-    VALUES(?,?,?,?,?,?,?, ?,?)
-  `).run(intentId, req.userRow.id, req.project.id, item.id, item.price, hash(confirmationToken), "pending", expires, now());
-
-  res.json({
-    intentId, confirmationToken,
-    itemId:item.id, itemName:item.name, amount:item.price,
-    currentBalance:req.userRow.balance,
-    balanceAfter:req.userRow.balance-item.price,
-    expiresAt:expires
-  });
-});
-
-app.post("/v1/purchases/confirm", requireBoth, (req,res)=>{
-  const {intentId, confirmationToken} = req.body;
-  const intent = db.prepare("SELECT * FROM purchase_intents WHERE id=?").get(String(intentId||""));
-  if (!intent || intent.user_id !== req.userRow.id || intent.project_id !== req.project.id)
-    return res.status(404).json({error:"Purchase intent not found"});
-  if (intent.status !== "pending") return res.status(409).json({error:"Purchase is no longer pending"});
-  if (Date.now() > intent.expires_at) {
-    db.prepare("UPDATE purchase_intents SET status='expired' WHERE id=?").run(intent.id);
-    return res.status(409).json({error:"Purchase confirmation expired"});
+app.post("/v1/auth/login", async (req,res) => {
+  try {
+    const username = String(req.body.username || "").trim();
+    const password = String(req.body.password || "");
+    const r = await pool.query("SELECT * FROM users WHERE LOWER(username)=LOWER($1)",[username]);
+    if (!r.rowCount) return res.status(401).json({error:"invalid_credentials"});
+    const user = r.rows[0];
+    const ok = await bcrypt.compare(password,user.password_hash);
+    if (!ok) return res.status(401).json({error:"invalid_credentials"});
+    const token = signToken(user);
+    res.json({ok:true,id:user.id,username:user.username,balance:user.balance,token});
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({error:"server_error"});
   }
-  if (hash(String(confirmationToken||"")) !== intent.confirmation_hash)
-    return res.status(401).json({error:"Invalid confirmation token"});
-
-  const transactionId = id("tx");
-  const tx = db.transaction(()=>{
-    const user = db.prepare("SELECT balance FROM users WHERE id=?").get(intent.user_id);
-    if (!user || user.balance < intent.amount) throw new Error("Insufficient TorchCoin");
-    db.prepare("UPDATE users SET balance=balance-? WHERE id=?").run(intent.amount,intent.user_id);
-    db.prepare(`
-      INSERT INTO transactions(id,user_id,project_id,type,amount,item_id,description,created_at)
-      VALUES(?,?,?,?,?,?,?,?)
-    `).run(transactionId,intent.user_id,intent.project_id,"purchase",-intent.amount,intent.item_id,
-      "TorchCoin purchase",now());
-    db.prepare("UPDATE purchase_intents SET status='confirmed' WHERE id=?").run(intent.id);
-  });
-  try { tx(); } catch(e) { return res.status(400).json({error:e.message}); }
-
-  const fresh = db.prepare("SELECT balance FROM users WHERE id=?").get(req.userRow.id);
-  res.json({success:true,transactionId,balance:fresh.balance});
 });
 
-app.get("/v1/transactions", requireBoth, (req,res)=>{
-  const limit = Math.min(Math.max(Number(req.query.limit||50),1),100);
-  const rows = db.prepare(`
-    SELECT id,project_id,type,amount,item_id,description,created_at
-    FROM transactions WHERE user_id=? ORDER BY created_at DESC LIMIT ?
-  `).all(req.userRow.id,limit);
-  res.json({transactions:rows});
+app.get("/v1/me", auth, async (req,res) => {
+  const r = await pool.query(
+    "SELECT id,username,balance,created_at FROM users WHERE id=$1",[req.user.sub]
+  );
+  if (!r.rowCount) return res.status(404).json({error:"user_not_found"});
+  res.json(r.rows[0]);
 });
 
-app.get("/v1/transactions/:id", requireUser, (req,res)=>{
-  const row = db.prepare("SELECT * FROM transactions WHERE id=? AND user_id=?")
-    .get(req.params.id,req.userRow.id);
-  if (!row) return res.status(404).json({error:"Transaction not found"});
-  res.json(row);
+app.get("/v1/wallet", auth, async (req,res) => {
+  const r = await pool.query("SELECT balance FROM users WHERE id=$1",[req.user.sub]);
+  if (!r.rowCount) return res.status(404).json({error:"user_not_found"});
+  res.json({balance:r.rows[0].balance});
 });
 
-app.listen(PORT,()=>console.log(`TorchCoin API listening on http://localhost:${PORT}`));
+app.get("/v1/transactions", auth, async (req,res) => {
+  const r = await pool.query(
+    `SELECT id,type,amount,balance_after,description,created_at
+     FROM transactions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 100`,
+    [req.user.sub]
+  );
+  res.json(r.rows);
+});
+
+app.get("/v1/transactions/:id", auth, async (req,res) => {
+  const r = await pool.query(
+    `SELECT id,type,amount,balance_after,description,created_at
+     FROM transactions WHERE id=$1 AND user_id=$2`,
+    [req.params.id,req.user.sub]
+  );
+  if (!r.rowCount) return res.status(404).json({error:"transaction_not_found"});
+  res.json(r.rows[0]);
+});
+
+init()
+  .then(() => app.listen(PORT, () => console.log("TorchCoin API listening on "+PORT)))
+  .catch(e => { console.error(e); process.exit(1); });
