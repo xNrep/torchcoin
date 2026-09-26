@@ -1,5 +1,7 @@
 # TorchCoin v4 — CodeTorch / PenguinMod
 
+##DISCLAIMER : THIS IS NOT A REAL CURRENCY WITH REAL VALUE. ITS NOR A CRYPTO !
+
 ## Render deployment
 
 This project is designed to be deployed as a Render Blueprint.
