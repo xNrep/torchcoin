@@ -1,31 +1,42 @@
-# TorchCoin v3
+# TorchCoin v4 — CodeTorch / PenguinMod
 
-## Extension
-`torchcoin.js` est une extension Scratch/PenguinMod/CodeTorch non sandboxée.
-Le serveur par défaut est :
-https://torchcoin.onrender.com
+## Render deployment
 
-Blocs principaux :
-- connect to TorchCoin API
-- is server online?
-- create TorchCoin account username [ ] password [ ]
-- login to TorchCoin username [ ] password [ ]
-- logout from TorchCoin
-- user token is valid?
-- TorchCoin balance
-- my TorchCoin user ID
-- my transactions (JSON)
-- TorchCoin last error
+This project is designed to be deployed as a Render Blueprint.
 
-## Serveur
-Le serveur utilise PostgreSQL et crée automatiquement les tables au démarrage.
+`render.yaml` creates:
+- a Node web service named `torchcoin`
+- a Render Postgres database named `torchcoin-db`
+- `DATABASE_URL` automatically connected to the database
+- a generated `JWT_SECRET`
 
-Variables Render :
-- DATABASE_URL : URL PostgreSQL
-- JWT_SECRET : secret aléatoire long
-- NODE_ENV=production
+### Important
 
-## Important
-Le token utilisateur est généré côté serveur. L'extension le garde uniquement en mémoire pendant la session.
-Les mots de passe sont hashés avec bcrypt.
-Pour une vraie mise en production : HTTPS, rate limiting, sauvegardes PostgreSQL, logs/audit et récupération de compte.
+The Blueprint must be deployed/synced from a repository containing this project.
+If you create the web service manually instead, you must create a Render Postgres database and add its internal connection string as `DATABASE_URL`.
+
+### API
+
+GET `/health`
+
+The health endpoint checks both the API and PostgreSQL.
+
+POST `/v1/auth/register`
+```json
+{"username":"player","password":"password123"}
+```
+
+POST `/v1/auth/login`
+```json
+{"username":"player","password":"password123"}
+```
+
+Authenticated endpoints:
+- GET `/v1/me`
+- GET `/v1/wallet`
+- GET `/v1/transactions`
+- GET `/v1/transactions/:id`
+
+Every new account starts with exactly 100 TC.
+
+There is intentionally no public mint/set-balance endpoint.

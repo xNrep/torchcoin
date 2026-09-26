@@ -2,6 +2,7 @@ services:
   - type: web
     name: torchcoin
     runtime: node
+    plan: free
     buildCommand: npm install
     startCommand: npm start
     envVars:
@@ -16,3 +17,4 @@ services:
 
 databases:
   - name: torchcoin-db
+    plan: free

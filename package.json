@@ -1,7 +1,9 @@
 {
-  "name": "torchcoin-api-v3",
-  "version": "3.0.0",
+  "name": "torchcoin-api",
+  "version": "4.0.0",
   "private": true,
+  "description": "TorchCoin API for CodeTorch/PenguinMod",
+  "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
@@ -9,10 +11,10 @@
     "node": ">=20"
   },
   "dependencies": {
-    "bcryptjs": "^2.4.3",
+    "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
-    "express": "^4.21.2",
+    "express": "^5.1.0",
     "jsonwebtoken": "^9.0.2",
-    "pg": "^8.13.1"
+    "pg": "^8.16.3"
   }
 }
