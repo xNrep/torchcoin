@@ -541,17 +541,12 @@ app.post("/register", async (req, res) => {
 
         });
 
-    } catch (error) {
-
-        console.error(
-            "REGISTER ERROR:",
-            error
-        );
-
-        res.status(500).json({
-            error:
-                "Registration failed"
-        });
+} catch (error) {
+    console.error("REGISTER ERROR:", error);
+    res.status(500).json({
+        error: error.message || "Registration failed"
+    });
+}
 
     }
 
