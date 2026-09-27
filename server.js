@@ -38,10 +38,7 @@ async function storageRequest(path, method = "POST", body = null) {
         options.body = JSON.stringify(body);
     }
 
-    const response = await fetch(
-        STORAGE_URL + path,
-        options
-    );
+    const response = await fetch(STORAGE_URL + path, options);
 
     let data = null;
 
@@ -49,14 +46,22 @@ async function storageRequest(path, method = "POST", body = null) {
         data = await response.json();
     } catch (_) {}
 
-    return {
-        response,
-        data
-    };
+    return { response, data };
 }
 
+function storageError(data, fallback) {
+    if (data && typeof data === "object") {
+        return (
+            data.error ||
+            data.message ||
+            data.detail ||
+            fallback
+        );
+    }
 
-// GET
+    return fallback;
+}
+
 async function storageGet(key) {
     const { response, data } =
         await storageRequest(
@@ -64,7 +69,7 @@ async function storageGet(key) {
             "POST",
             {
                 apiKey: STORAGE_KEY,
-                key: key
+                key
             }
         );
 
@@ -73,22 +78,30 @@ async function storageGet(key) {
     }
 
     if (!response.ok) {
-        throw new Error("Server Storage: request failed");
+        throw new Error(
+            storageError(
+                data,
+                "Server Storage: request failed"
+            )
+        );
     }
 
-    if (
-        data &&
-        data.success &&
-        data.data
-    ) {
+    if (data && data.success && data.data) {
         return data.data.value;
+    }
+
+    if (data && data.success === false) {
+        throw new Error(
+            storageError(
+                data,
+                "Server Storage: get failed"
+            )
+        );
     }
 
     return null;
 }
 
-
-// SAVE
 async function storageSet(key, value) {
     const { response, data } =
         await storageRequest(
@@ -96,8 +109,8 @@ async function storageSet(key, value) {
             "POST",
             {
                 apiKey: STORAGE_KEY,
-                key: key,
-                value: value,
+                key,
+                value,
                 mimeType: "application/json"
             }
         );
@@ -106,19 +119,18 @@ async function storageSet(key, value) {
         throw new Error("Server Storage: unauthorized");
     }
 
-    if (
-        !response.ok ||
-        !data ||
-        !data.success
-    ) {
-        throw new Error("Server Storage: write failed");
+    if (!response.ok || !data || !data.success) {
+        throw new Error(
+            storageError(
+                data,
+                "Server Storage: write failed"
+            )
+        );
     }
 
     return true;
 }
 
-
-// DELETE
 async function storageDelete(key) {
     const { response, data } =
         await storageRequest(
@@ -126,7 +138,7 @@ async function storageDelete(key) {
             "DELETE",
             {
                 apiKey: STORAGE_KEY,
-                key: key
+                key
             }
         );
 
@@ -134,19 +146,18 @@ async function storageDelete(key) {
         throw new Error("Server Storage: unauthorized");
     }
 
-    if (
-        !response.ok ||
-        !data ||
-        !data.success
-    ) {
-        throw new Error("Server Storage: delete failed");
+    if (!response.ok || !data || !data.success) {
+        throw new Error(
+            storageError(
+                data,
+                "Server Storage: delete failed"
+            )
+        );
     }
 
     return true;
 }
 
-
-// JSON helpers
 async function readJSON(key, fallback = null) {
     const value = await storageGet(key);
 
@@ -165,14 +176,9 @@ async function readJSON(key, fallback = null) {
     }
 }
 
-
 async function writeJSON(key, value) {
-    return storageSet(
-        key,
-        JSON.stringify(value)
-    );
+    return storageSet(key, JSON.stringify(value));
 }
-
 
 // --------------------------------------------------
 // HELPERS
@@ -182,40 +188,35 @@ function generateId() {
     return crypto.randomUUID();
 }
 
-
 function createToken(userId) {
+    if (!JWT_SECRET) {
+        throw new Error(
+            "JWT_SECRET is not configured on the server"
+        );
+    }
+
     return jwt.sign(
-        {
-            sub: userId
-        },
+        { sub: userId },
         JWT_SECRET,
-        {
-            expiresIn: "30d"
-        }
+        { expiresIn: "30d" }
     );
 }
 
-
-// Storage keys
 function userKey(userId) {
     return `torchbank:user:${userId}`;
 }
-
 
 function usernameKey(username) {
     return `torchbank:username:${username.toLowerCase()}`;
 }
 
-
 function transactionKey(userId) {
     return `torchbank:transactions:${userId}`;
 }
 
-
 function purchaseKey(purchaseId) {
     return `torchbank:purchase:${purchaseId}`;
 }
-
 
 // --------------------------------------------------
 // AUTHENTICATION
@@ -232,19 +233,14 @@ function authenticate(req, res, next) {
             });
         }
 
-        const token =
-            header.substring(7);
+        const token = header.substring(7);
 
         const decoded =
-            jwt.verify(
-                token,
-                JWT_SECRET
-            );
+            jwt.verify(token, JWT_SECRET);
 
         req.userId = decoded.sub;
 
         next();
-
     } catch (_) {
         return res.status(401).json({
             error: "Invalid or expired token"
@@ -252,23 +248,13 @@ function authenticate(req, res, next) {
     }
 }
 
-
 // --------------------------------------------------
 // SIMPLE LOCK
 // --------------------------------------------------
 
-// Server Storage doesn't provide an atomic
-// balance increment operation through the API
-// exposed by your extension.
-//
-// This prevents two simultaneous purchases
-// from the SAME user being processed at once
-// on this Render instance.
-
 const locks = new Map();
 
 async function withUserLock(userId, callback) {
-
     const previous =
         locks.get(userId) ||
         Promise.resolve();
@@ -286,85 +272,58 @@ async function withUserLock(userId, callback) {
 
     try {
         return await callback();
-
     } finally {
-
         release();
 
-        if (
-            locks.get(userId) === current
-        ) {
+        if (locks.get(userId) === current) {
             locks.delete(userId);
         }
     }
 }
 
-
 // --------------------------------------------------
 // TRANSACTIONS
 // --------------------------------------------------
 
-async function addTransaction(
-    userId,
-    transaction
-) {
-
-    const key =
-        transactionKey(userId);
+async function addTransaction(userId, transaction) {
+    const key = transactionKey(userId);
 
     const transactions =
-        await readJSON(
-            key,
-            []
-        );
+        await readJSON(key, []);
 
-    transactions.unshift(
-        transaction
-    );
+    transactions.unshift(transaction);
 
-    // Keep the last 100 transactions
     if (transactions.length > 100) {
         transactions.length = 100;
     }
 
-    await writeJSON(
-        key,
-        transactions
-    );
+    await writeJSON(key, transactions);
 }
-
 
 // --------------------------------------------------
 // BASIC ROUTES
 // --------------------------------------------------
 
 app.get("/", (req, res) => {
-
     res.json({
         name: "TorchBank",
         status: "online",
         currency: "TorchCoin",
         symbol: "TC"
     });
-
 });
-
 
 // --------------------------------------------------
 // HEALTH CHECK
 // --------------------------------------------------
 
 app.get("/health", async (req, res) => {
-
     try {
-
-        const {
-            response,
-            data
-        } = await storageRequest(
-            "ping.php",
-            "GET"
-        );
+        const { response, data } =
+            await storageRequest(
+                "ping.php",
+                "GET"
+            );
 
         const working =
             response.ok &&
@@ -383,27 +342,20 @@ app.get("/health", async (req, res) => {
             ok: true,
             storage: "online"
         });
-
     } catch (_) {
-
         res.status(503).json({
             ok: false,
             storage: "offline"
         });
-
     }
-
 });
-
 
 // --------------------------------------------------
 // REGISTER
 // --------------------------------------------------
 
 app.post("/register", async (req, res) => {
-
     try {
-
         const username =
             String(
                 req.body.username || ""
@@ -414,55 +366,40 @@ app.post("/register", async (req, res) => {
                 req.body.password || ""
             );
 
-
-        // Username validation
         if (
             !/^[A-Za-z0-9_-]{3,24}$/.test(
                 username
             )
         ) {
-
             return res.status(400).json({
                 error:
                     "Username must contain 3-24 characters"
             });
-
         }
 
-
-        // Password validation
         if (
             password.length < 6 ||
             password.length > 128
         ) {
-
             return res.status(400).json({
                 error:
                     "Password must contain 6-128 characters"
             });
-
         }
 
-
-        // Check username
         const existing =
             await storageGet(
                 usernameKey(username)
             );
 
         if (existing) {
-
             return res.status(409).json({
                 error:
                     "Username already exists"
             });
-
         }
 
-
-        const userId =
-            generateId();
-
+        const userId = generateId();
 
         const passwordHash =
             await bcrypt.hash(
@@ -470,97 +407,69 @@ app.post("/register", async (req, res) => {
                 12
             );
 
-
         const user = {
-
             id: userId,
-
-            username: username,
-
-            passwordHash:
-                passwordHash,
-
-            balance:
-                STARTING_BALANCE,
-
+            username,
+            passwordHash,
+            balance: STARTING_BALANCE,
             createdAt:
                 new Date().toISOString()
         };
 
-
-        // Username -> user ID
         await storageSet(
             usernameKey(username),
             userId
         );
 
-
-        // User account
         await writeJSON(
             userKey(userId),
             user
         );
 
-
-        // Initial transaction
         await writeJSON(
             transactionKey(userId),
             [
                 {
                     id: generateId(),
-
                     type: "system",
-
-                    amount:
-                        STARTING_BALANCE,
-
+                    amount: STARTING_BALANCE,
                     description:
                         "Initial TorchCoin balance",
-
                     createdAt:
                         new Date().toISOString()
                 }
             ]
         );
 
-
         res.status(201).json({
-
-            token:
-                createToken(userId),
-
+            token: createToken(userId),
             user: {
-
                 id: userId,
-
-                username: username,
-
-                balance:
-                    STARTING_BALANCE
+                username,
+                balance: STARTING_BALANCE
             }
-
         });
+    } catch (error) {
+        console.error(
+            "REGISTER ERROR:",
+            error
+        );
 
-} catch (error) {
-    console.error("REGISTER ERROR:", error);
-    res.status(500).json({
-        error: error.message || "Registration failed"
-    });
-}
-
+        res.status(500).json({
+            error:
+                error && error.message
+                    ? error.message
+                    : "Registration failed"
+        });
     }
-
 });
-
 
 // --------------------------------------------------
 // LOGIN
 // --------------------------------------------------
 
 app.post("/login", async (req, res) => {
-
     try {
-
         const username =
             String(
                 req.body.username || ""
@@ -571,38 +480,29 @@ app.post("/login", async (req, res) => {
                 req.body.password || ""
             );
 
-
         const userId =
             await storageGet(
                 usernameKey(username)
             );
 
-
         if (!userId) {
-
             return res.status(401).json({
                 error:
                     "Invalid username or password"
             });
-
         }
-
 
         const user =
             await readJSON(
                 userKey(userId)
             );
 
-
         if (!user) {
-
             return res.status(401).json({
                 error:
                     "Invalid username or password"
             });
-
         }
-
 
         const valid =
             await bcrypt.compare(
@@ -610,39 +510,23 @@ app.post("/login", async (req, res) => {
                 user.passwordHash
             );
 
-
         if (!valid) {
-
             return res.status(401).json({
                 error:
                     "Invalid username or password"
             });
-
         }
 
-
         res.json({
-
             token:
-                createToken(
-                    user.id
-                ),
-
+                createToken(user.id),
             user: {
-
                 id: user.id,
-
-                username:
-                    user.username,
-
-                balance:
-                    user.balance
+                username: user.username,
+                balance: user.balance
             }
-
         });
-
     } catch (error) {
-
         console.error(
             "LOGIN ERROR:",
             error
@@ -650,13 +534,12 @@ app.post("/login", async (req, res) => {
 
         res.status(500).json({
             error:
-                "Login failed"
+                error && error.message
+                    ? error.message
+                    : "Login failed"
         });
-
     }
-
 });
-
 
 // --------------------------------------------------
 // ACCOUNT
@@ -666,55 +549,33 @@ app.get(
     "/me",
     authenticate,
     async (req, res) => {
-
         try {
-
             const user =
                 await readJSON(
-                    userKey(
-                        req.userId
-                    )
+                    userKey(req.userId)
                 );
 
-
             if (!user) {
-
                 return res.status(404).json({
                     error:
                         "Account not found"
                 });
-
             }
 
-
             res.json({
-
-                id:
-                    user.id,
-
-                username:
-                    user.username,
-
-                balance:
-                    user.balance,
-
-                currency:
-                    "TC"
-
+                id: user.id,
+                username: user.username,
+                balance: user.balance,
+                currency: "TC"
             });
-
         } catch (_) {
-
             res.status(500).json({
                 error:
                     "Could not load account"
             });
-
         }
-
     }
 );
-
 
 // --------------------------------------------------
 // BALANCE
@@ -724,49 +585,31 @@ app.get(
     "/balance",
     authenticate,
     async (req, res) => {
-
         try {
-
             const user =
                 await readJSON(
-                    userKey(
-                        req.userId
-                    )
+                    userKey(req.userId)
                 );
 
-
             if (!user) {
-
                 return res.status(404).json({
                     error:
                         "Account not found"
                 });
-
             }
 
-
             res.json({
-
-                balance:
-                    user.balance,
-
-                currency:
-                    "TC"
-
+                balance: user.balance,
+                currency: "TC"
             });
-
         } catch (_) {
-
             res.status(500).json({
                 error:
                     "Could not load balance"
             });
-
         }
-
     }
 );
-
 
 // --------------------------------------------------
 // TRANSACTIONS
@@ -776,9 +619,7 @@ app.get(
     "/transactions",
     authenticate,
     async (req, res) => {
-
         try {
-
             const transactions =
                 await readJSON(
                     transactionKey(
@@ -787,24 +628,17 @@ app.get(
                     []
                 );
 
-
             res.json({
-                transactions:
-                    transactions
+                transactions
             });
-
         } catch (_) {
-
             res.status(500).json({
                 error:
                     "Could not load transactions"
             });
-
         }
-
     }
 );
-
 
 // --------------------------------------------------
 // CREATE PURCHASE
@@ -814,9 +648,7 @@ app.post(
     "/purchase/create",
     authenticate,
     async (req, res) => {
-
         try {
-
             const amount =
                 Number(
                     req.body.amount
@@ -834,107 +666,61 @@ app.post(
                     "unknown"
                 ).slice(0, 100);
 
-
             if (
                 !Number.isInteger(amount) ||
                 amount <= 0 ||
                 amount > 1000000
             ) {
-
                 return res.status(400).json({
                     error:
                         "Invalid purchase amount"
                 });
-
             }
-
 
             const user =
                 await readJSON(
-                    userKey(
-                        req.userId
-                    )
+                    userKey(req.userId)
                 );
 
-
             if (!user) {
-
                 return res.status(404).json({
                     error:
                         "Account not found"
                 });
-
             }
 
-
-            if (
-                user.balance < amount
-            ) {
-
+            if (user.balance < amount) {
                 return res.status(400).json({
                     error:
                         "Insufficient balance"
                 });
-
             }
-
 
             const purchaseId =
                 generateId();
 
-
             await writeJSON(
-                purchaseKey(
-                    purchaseId
-                ),
+                purchaseKey(purchaseId),
                 {
-
-                    id:
-                        purchaseId,
-
-                    userId:
-                        req.userId,
-
-                    amount:
-                        amount,
-
-                    description:
-                        description,
-
-                    appId:
-                        appId,
-
-                    status:
-                        "pending",
-
+                    id: purchaseId,
+                    userId: req.userId,
+                    amount,
+                    description,
+                    appId,
+                    status: "pending",
                     createdAt:
                         new Date().toISOString()
-
                 }
             );
 
-
             res.status(201).json({
-
-                purchaseId:
-                    purchaseId,
-
-                amount:
-                    amount,
-
-                description:
-                    description,
-
-                appId:
-                    appId,
-
-                status:
-                    "pending"
-
+                purchaseId,
+                amount,
+                description,
+                appId,
+                status: "pending"
             });
-
         } catch (error) {
-
             console.error(
                 "PURCHASE CREATE ERROR:",
                 error
@@ -944,12 +730,9 @@ app.post(
                 error:
                     "Could not create purchase"
             });
-
         }
-
     }
 );
-
 
 // --------------------------------------------------
 // CONFIRM PURCHASE
@@ -959,31 +742,24 @@ app.post(
     "/purchase/confirm",
     authenticate,
     async (req, res) => {
-
         try {
-
             const purchaseId =
                 String(
                     req.body.purchaseId ||
                     ""
                 );
 
-
             if (!purchaseId) {
-
                 return res.status(400).json({
                     error:
                         "Missing purchaseId"
                 });
-
             }
-
 
             const result =
                 await withUserLock(
                     req.userId,
                     async () => {
-
                         const purchase =
                             await readJSON(
                                 purchaseKey(
@@ -991,34 +767,24 @@ app.post(
                                 )
                             );
 
-
                         if (
                             !purchase ||
                             purchase.userId !==
                                 req.userId
                         ) {
-
                             return {
-
-                                status:
-                                    404,
-
+                                status: 404,
                                 body: {
                                     error:
                                         "Purchase not found"
                                 }
-
                             };
-
                         }
 
-
-                        // Already processed
                         if (
                             purchase.status ===
                             "confirmed"
                         ) {
-
                             const user =
                                 await readJSON(
                                     userKey(
@@ -1026,49 +792,29 @@ app.post(
                                     )
                                 );
 
-
                             return {
-
-                                status:
-                                    200,
-
+                                status: 200,
                                 body: {
-
-                                    success:
-                                        true,
-
-                                    alreadyConfirmed:
-                                        true,
-
+                                    success: true,
+                                    alreadyConfirmed: true,
                                     balance:
                                         user.balance
-
                                 }
-
                             };
-
                         }
-
 
                         if (
                             purchase.status !==
                             "pending"
                         ) {
-
                             return {
-
-                                status:
-                                    400,
-
+                                status: 400,
                                 body: {
                                     error:
                                         "Purchase is not pending"
                                 }
-
                             };
-
                         }
-
 
                         const user =
                             await readJSON(
@@ -1077,48 +823,31 @@ app.post(
                                 )
                             );
 
-
                         if (!user) {
-
                             return {
-
-                                status:
-                                    404,
-
+                                status: 404,
                                 body: {
                                     error:
                                         "Account not found"
                                 }
-
                             };
-
                         }
-
 
                         if (
                             user.balance <
                             purchase.amount
                         ) {
-
                             return {
-
-                                status:
-                                    400,
-
+                                status: 400,
                                 body: {
                                     error:
                                         "Insufficient balance"
                                 }
-
                             };
-
                         }
 
-
-                        // Charge
                         user.balance -=
                             purchase.amount;
-
 
                         await writeJSON(
                             userKey(
@@ -1127,44 +856,29 @@ app.post(
                             user
                         );
 
-
-                        // Transaction
                         await addTransaction(
                             req.userId,
                             {
-
-                                id:
-                                    generateId(),
-
-                                type:
-                                    "purchase",
-
+                                id: generateId(),
+                                type: "purchase",
                                 amount:
                                     -purchase.amount,
-
                                 description:
                                     purchase.description,
-
                                 appId:
                                     purchase.appId,
-
                                 purchaseId:
                                     purchase.id,
-
                                 createdAt:
                                     new Date().toISOString()
-
                             }
                         );
 
-
-                        // Mark purchase confirmed
                         purchase.status =
                             "confirmed";
 
                         purchase.confirmedAt =
                             new Date().toISOString();
-
 
                         await writeJSON(
                             purchaseKey(
@@ -1173,44 +887,26 @@ app.post(
                             purchase
                         );
 
-
                         return {
-
-                            status:
-                                200,
-
+                            status: 200,
                             body: {
-
-                                success:
-                                    true,
-
+                                success: true,
                                 purchaseId:
                                     purchase.id,
-
                                 charged:
                                     purchase.amount,
-
                                 balance:
                                     user.balance,
-
-                                currency:
-                                    "TC"
-
+                                currency: "TC"
                             }
-
                         };
-
                     }
                 );
-
 
             res
                 .status(result.status)
                 .json(result.body);
-
-
         } catch (error) {
-
             console.error(
                 "PURCHASE CONFIRM ERROR:",
                 error
@@ -1220,35 +916,37 @@ app.post(
                 error:
                     "Could not confirm purchase"
             });
-
         }
-
     }
 );
-
 
 // --------------------------------------------------
 // INTENTIONALLY NO:
 // --------------------------------------------------
-//
 // POST /mint
 // POST /set-balance
 // POST /delete-balance
 // POST /give-money
-//
-// A public project cannot directly
-// create or modify arbitrary balances.
-//
-// --------------------------------------------------
-
 
 app.listen(
     PORT,
     () => {
-
         console.log(
             `TorchBank running on port ${PORT}`
         );
 
+        console.log(
+            "SERVER_STORAGE_API_KEY:",
+            STORAGE_KEY
+                ? "configured"
+                : "MISSING"
+        );
+
+        console.log(
+            "JWT_SECRET:",
+            JWT_SECRET
+                ? "configured"
+                : "MISSING"
+        );
     }
 );
