@@ -13,14 +13,14 @@ services:
         value: production
       - key: DATABASE_URL
         fromDatabase:
-          name: torchcoin-db-recovery
+          name: torchcoin-db
           property: connectionString
       - key: JWT_SECRET
         generateValue: true
 
 databases:
-  - name: torchcoin-db-recovery
-    databaseName: torchcoin_db_recovery
+  - name: torchcoin-db
+    databaseName: torchcoin_db
     user: torchcoin_db_user
     plan: free
     region: oregon
