@@ -3,6 +3,7 @@ const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
+const { Pool } = require("pg");
 
 const app = express();
 
@@ -17,6 +18,29 @@ const STORAGE_URL =
         .replace(/\/+$/, "") + "/";
 
 const STORAGE_KEY = process.env.SERVER_STORAGE_API_KEY || "";
+const DATABASE_URL = process.env.DATABASE_URL || "";
+const pgPool = DATABASE_URL
+    ? new Pool({
+        connectionString: DATABASE_URL,
+        ssl: { rejectUnauthorized: false },
+        max: 5
+    })
+    : null;
+let postgresStorageReady = null;
+
+async function ensurePostgresStorage() {
+    if (!pgPool) return;
+    if (!postgresStorageReady) {
+        postgresStorageReady = pgPool.query(`
+            CREATE TABLE IF NOT EXISTS torchbank_kv (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        `);
+    }
+    await postgresStorageReady;
+}
 const JWT_SECRET = process.env.JWT_SECRET || "";
 
 const STARTING_BALANCE = 100;
@@ -63,6 +87,14 @@ function storageError(data, fallback) {
 }
 
 async function storageGet(key) {
+    if (pgPool) {
+        await ensurePostgresStorage();
+        const result = await pgPool.query(
+            "SELECT value FROM torchbank_kv WHERE key = $1",
+            [key]
+        );
+        return result.rows.length ? result.rows[0].value : null;
+    }
     const { response, data } =
         await storageRequest(
             "get.php",
@@ -103,6 +135,17 @@ async function storageGet(key) {
 }
 
 async function storageSet(key, value) {
+    if (pgPool) {
+        await ensurePostgresStorage();
+        await pgPool.query(
+            `INSERT INTO torchbank_kv (key, value, updated_at)
+             VALUES ($1, $2, NOW())
+             ON CONFLICT (key) DO UPDATE
+             SET value = EXCLUDED.value, updated_at = NOW()`,
+            [key, String(value)]
+        );
+        return true;
+    }
     const { response, data } =
         await storageRequest(
             "store.php",
@@ -132,6 +175,14 @@ async function storageSet(key, value) {
 }
 
 async function storageDelete(key) {
+    if (pgPool) {
+        await ensurePostgresStorage();
+        await pgPool.query(
+            "DELETE FROM torchbank_kv WHERE key = $1",
+            [key]
+        );
+        return true;
+    }
     const { response, data } =
         await storageRequest(
             "delete.php",
@@ -319,34 +370,25 @@ app.get("/", (req, res) => {
 
 app.get("/health", async (req, res) => {
     try {
-        const { response, data } =
-            await storageRequest(
-                "ping.php",
-                "GET"
-            );
-
-        const working =
-            response.ok &&
-            data &&
-            data.success === true &&
-            data.status === "ok";
-
-        if (!working) {
-            return res.status(503).json({
-                ok: false,
-                storage: "offline"
-            });
+        if (pgPool) {
+            await ensurePostgresStorage();
+            await pgPool.query("SELECT 1");
+        } else {
+            const { response, data } = await storageRequest("ping.php", "GET");
+            const working = response.ok && data &&
+                data.success === true && data.status === "ok";
+            if (!working) {
+                return res.status(503).json({ ok: false, storage: "offline" });
+            }
         }
-
         res.json({
             ok: true,
-            storage: "online"
+            storage: "online",
+            backend: pgPool ? "postgres" : "external"
         });
-    } catch (_) {
-        res.status(503).json({
-            ok: false,
-            storage: "offline"
-        });
+    } catch (error) {
+        console.error("HEALTH CHECK ERROR:", error);
+        res.status(503).json({ ok: false, storage: "offline" });
     }
 });
 
