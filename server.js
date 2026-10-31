@@ -465,6 +465,137 @@ app.post("/register", async (req, res) => {
 });
 
 // --------------------------------------------------
+// ENCRYPTED ACCOUNT RECOVERY
+// --------------------------------------------------
+// Keep RECOVERY_SIGNING_SECRET stable in Render environment variables.
+// JWT_SECRET is used as a compatibility fallback, but a dedicated secret is preferred.
+const RECOVERY_SIGNING_SECRET =
+    process.env.RECOVERY_SIGNING_SECRET || JWT_SECRET;
+
+function recoverySignature(value) {
+    if (!RECOVERY_SIGNING_SECRET) {
+        throw new Error("RECOVERY_SIGNING_SECRET (or JWT_SECRET) is not configured");
+    }
+    return crypto.createHmac("sha256", RECOVERY_SIGNING_SECRET)
+        .update(value)
+        .digest("base64url");
+}
+
+function recoveryCodeFor(snapshot) {
+    const secret = crypto.randomBytes(32).toString("base64url");
+    const key = crypto.scryptSync(secret, "TorchBank Recovery v1", 32);
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+    const ciphertext = Buffer.concat([
+        cipher.update(JSON.stringify(snapshot), "utf8"),
+        cipher.final()
+    ]).toString("base64url");
+    const tag = cipher.getAuthTag().toString("base64url");
+    const unsigned = ["TB1", secret, iv.toString("base64url"), tag, ciphertext].join(".");
+    return unsigned + "." + recoverySignature(unsigned);
+}
+
+function decodeRecoveryCode(code) {
+    if (typeof code !== "string" || code.length > 200000) {
+        throw new Error("Invalid recovery code");
+    }
+    const parts = code.trim().split(".");
+    if (parts.length !== 6 || parts[0] !== "TB1") {
+        throw new Error("Invalid recovery code format");
+    }
+    const unsigned = parts.slice(0, 5).join(".");
+    const expected = Buffer.from(recoverySignature(unsigned), "base64url");
+    const supplied = Buffer.from(parts[5], "base64url");
+    if (expected.length !== supplied.length ||
+        !crypto.timingSafeEqual(expected, supplied)) {
+        throw new Error("Recovery code signature is invalid");
+    }
+    const secret = parts[1];
+    const key = crypto.scryptSync(secret, "TorchBank Recovery v1", 32);
+    const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(parts[2], "base64url"));
+    decipher.setAuthTag(Buffer.from(parts[3], "base64url"));
+    const plaintext = Buffer.concat([
+        decipher.update(Buffer.from(parts[4], "base64url")),
+        decipher.final()
+    ]).toString("utf8");
+    return JSON.parse(plaintext);
+}
+
+app.post("/recovery/create", authenticate, async (req, res) => {
+    try {
+        const user = await readJSON(userKey(req.userId));
+        if (!user) return res.status(404).json({ error: "Account not found" });
+        const transactions = await readJSON(transactionKey(req.userId), []);
+        const recoveryCode = recoveryCodeFor({
+            version: 1,
+            user,
+            transactions,
+            createdAt: new Date().toISOString()
+        });
+        res.json({
+            recoveryCode,
+            warning: "Keep this code private. Anyone with it can restore this account."
+        });
+    } catch (error) {
+        console.error("RECOVERY CREATE ERROR:", error);
+        res.status(500).json({ error: error.message || "Could not create recovery code" });
+    }
+});
+
+app.post("/recovery/restore", async (req, res) => {
+    let restoredUserId = null;
+    let restoredUsernameKey = null;
+    try {
+        const snapshot = decodeRecoveryCode(String(req.body.code || ""));
+        const user = snapshot && snapshot.user;
+        const transactions = snapshot && snapshot.transactions;
+        if (snapshot.version !== 1 || !user || typeof user.id !== "string" ||
+            typeof user.username !== "string" || typeof user.passwordHash !== "string" ||
+            !Number.isSafeInteger(user.balance) || user.balance < 0 ||
+            !Array.isArray(transactions) || transactions.length > 100) {
+            return res.status(400).json({ error: "Recovery snapshot is invalid" });
+        }
+        if (!/^[A-Za-z0-9_-]{3,24}$/.test(user.username)) {
+            return res.status(400).json({ error: "Recovery snapshot has an invalid username" });
+        }
+
+        const existingUser = await storageGet(usernameKey(user.username));
+        const existingById = await readJSON(userKey(user.id));
+        if (existingUser || existingById) {
+            return res.status(409).json({
+                error: "An account with this identity already exists; recovery will not overwrite it"
+            });
+        }
+
+        // Restore the account and its transaction history. If a later write fails,
+        // attempt to remove partial records so the account is not left half-restored.
+        restoredUserId = user.id;
+        restoredUsernameKey = usernameKey(user.username);
+        await writeJSON(userKey(user.id), user);
+        await storageSet(restoredUsernameKey, user.id);
+        await writeJSON(transactionKey(user.id), transactions);
+
+        return res.status(201).json({
+            success: true,
+            token: createToken(user.id),
+            user: { id: user.id, username: user.username, balance: user.balance }
+        });
+    } catch (error) {
+        if (restoredUserId) {
+            try { await storageDelete(userKey(restoredUserId)); } catch (_) {}
+            try { await storageDelete(transactionKey(restoredUserId)); } catch (_) {}
+            if (restoredUsernameKey) {
+                try { await storageDelete(restoredUsernameKey); } catch (_) {}
+            }
+        }
+        console.error("RECOVERY RESTORE ERROR:", error);
+        const message = error && error.message ? error.message : "Could not restore account";
+        const clientError = /Invalid recovery|signature|authenticate|Unsupported state|unable to authenticate|JSON/i.test(message);
+        return res.status(clientError ? 400 : 500).json({ error: clientError ? "Invalid recovery code or damaged backup" : message });
+    }
+});
+
+// --------------------------------------------------
 // LOGIN
 // --------------------------------------------------
 
